@@ -13,12 +13,20 @@ const env = {
 const tokenKey = 'morning-duty.auth.token';
 const pkceKey = 'morning-duty.auth.pkce';
 let moduleId = 0;
-async function setup(storage = new Map(), href = 'http://localhost:5173/') {
+const sessions = new WeakMap();
+const idToken = (expiresAt = Date.now() + 3600000) => `header.${Buffer.from(JSON.stringify({ exp: Math.floor(expiresAt / 1000) })).toString('base64url')}.signature`;
+async function setup(storage = new Map(), href = 'http://localhost:5173/', session = sessions.get(storage) ?? new Map()) {
+  sessions.set(storage, session);
   const redirects = [];
-  globalThis.sessionStorage = {
+  globalThis.localStorage = {
     getItem: (key) => storage.get(key) ?? null,
     setItem: (key, value) => storage.set(key, value),
     removeItem: (key) => storage.delete(key),
+  };
+  globalThis.sessionStorage = {
+    getItem: (key) => session.get(key) ?? null,
+    setItem: (key, value) => session.set(key, value),
+    removeItem: (key) => session.delete(key),
   };
   globalThis.window = new EventTarget();
   window.location = { href, replace: (url) => redirects.push(new URL(url)) };
@@ -27,10 +35,10 @@ async function setup(storage = new Map(), href = 'http://localhost:5173/') {
     .replace('import.meta.env', JSON.stringify(env));
   const moduleUrl = `data:text/javascript;base64,${Buffer.from(source + `\n// ${moduleId++}`).toString('base64')}`;
   const auth = await import(moduleUrl);
-  return { auth, storage, redirects, moduleUrl };
+  return { auth, storage, session, redirects, moduleUrl };
 }
 function storedToken(storage) {
-  storage.set(tokenKey, JSON.stringify({ accessToken: 'test-access', expiresAt: Date.now() + 3600000 }));
+  storage.set(tokenKey, JSON.stringify({ accessToken: 'test-access', idToken: idToken(), idExpiresAt: Date.now() + 3600000, expiresAt: Date.now() + 3600000 }));
 }
 async function loginCallback(storage, state) {
   return setup(storage, `http://localhost:5173/?code=test-code&state=${state}&keep=yes`);
@@ -40,7 +48,7 @@ test('PKCE S256, state, one-use exchange, callback cleanup and session reload', 
   let ctx = await setup();
   assert.equal(await ctx.auth.initializeAuth(), false);
   const request = ctx.redirects[0].searchParams;
-  const tx = JSON.parse(ctx.storage.get(pkceKey));
+  const tx = JSON.parse(ctx.session.get(pkceKey));
   assert.equal(request.get('scope'), 'openid');
   assert.equal(request.get('response_type'), 'code');
   assert.equal(request.get('code_challenge_method'), 'S256');
@@ -54,14 +62,16 @@ test('PKCE S256, state, one-use exchange, callback cleanup and session reload', 
     assert.equal(url.pathname, '/oauth2/token');
     assert.equal(options.body.get('code_verifier'), tx.verifier);
     assert.equal(options.body.get('client_secret'), null);
-    return { ok: true, json: async () => ({ access_token: 'test-access', token_type: 'Bearer', expires_in: 3600, id_token: 'unused-id', refresh_token: 'unused-refresh' }) };
+    return { ok: true, json: async () => ({ access_token: 'test-access', id_token: idToken(), token_type: 'Bearer', expires_in: 3600, refresh_token: 'unused-refresh' }) };
   };
   assert.deepEqual(await Promise.all([ctx.auth.initializeAuth(), ctx.auth.initializeAuth()]), [true, true]);
   assert.equal(exchanges, 1);
   assert.equal(window.location.href, 'http://localhost:5173/?keep=yes');
-  assert.equal(ctx.storage.has(pkceKey), false);
+  assert.equal(ctx.session.has(pkceKey), false);
   assert.equal(ctx.auth.getAccessToken(), 'test-access');
-  assert.equal(JSON.stringify([...ctx.storage]).includes('unused-'), false);
+  assert.equal(JSON.parse(ctx.storage.get(tokenKey)).refreshToken, 'unused-refresh');
+  assert.ok(JSON.parse(ctx.storage.get(tokenKey)).idToken);
+  assert.ok(JSON.parse(ctx.storage.get(tokenKey)).idExpiresAt > Date.now());
   ctx = await setup(ctx.storage);
   assert.equal(await ctx.auth.initializeAuth(), true);
   assert.equal(ctx.redirects.length, 0);
@@ -71,9 +81,9 @@ test('invalid/missing/expired state and provider/token errors never authenticate
   for (const kind of ['wrong', 'missing', 'expired', 'provider', 'exchange']) {
     let ctx = await setup();
     await ctx.auth.initializeAuth();
-    const tx = JSON.parse(ctx.storage.get(pkceKey));
-    if (kind === 'missing') ctx.storage.delete(pkceKey);
-    if (kind === 'expired') ctx.storage.set(pkceKey, JSON.stringify({ ...tx, createdAt: Date.now() - 700000 }));
+    const tx = JSON.parse(ctx.session.get(pkceKey));
+    if (kind === 'missing') ctx.session.delete(pkceKey);
+    if (kind === 'expired') ctx.session.set(pkceKey, JSON.stringify({ ...tx, createdAt: Date.now() - 700000 }));
     ctx = await loginCallback(ctx.storage, kind === 'wrong' ? 'wrong' : tx.state);
     if (kind === 'provider') window.location.href = 'http://localhost:5173/?error=access_denied';
     let exchanges = 0;
@@ -94,7 +104,7 @@ test('401 recovery redirects once across reload, blocks repeated failures, manua
   await Promise.all([ctx.auth.recoverAuthentication(), ctx.auth.recoverAuthentication()]);
   assert.equal(ctx.redirects.length, 1);
   assert.equal(ctx.auth.getAccessToken(), null);
-  const first = JSON.parse(ctx.storage.get(pkceKey));
+  const first = JSON.parse(ctx.session.get(pkceKey));
   ctx = await setup(ctx.storage);
   storedToken(ctx.storage);
   await ctx.auth.recoverAuthentication();
@@ -102,7 +112,7 @@ test('401 recovery redirects once across reload, blocks repeated failures, manua
   assert.equal(ctx.auth.getAccessToken(), null);
   await ctx.auth.retryLogin();
   assert.equal(ctx.redirects.length, 1);
-  const second = JSON.parse(ctx.storage.get(pkceKey));
+  const second = JSON.parse(ctx.session.get(pkceKey));
   assert.notEqual(first.verifier, second.verifier);
   assert.notEqual(first.state, second.state);
 });
@@ -148,4 +158,196 @@ test('Axios guards all three APIs, attaches access token, sanitizes errors, hand
   assert.equal(ctx.redirects.length, 1);
   for (const path of ['/calendar', '/me/notification', '/schedule/swap']) await assert.rejects(api.get(path));
   assert.equal(sent, 3);
+});
+
+
+test('expired session refreshes once for concurrent requests, rotates and preserves refresh tokens', async () => {
+  let ctx = await setup();
+  ctx.storage.set(tokenKey, JSON.stringify({ accessToken: 'old', expiresAt: Date.now() + 10000, refreshToken: 'refresh-1' }));
+  let calls = 0;
+  globalThis.fetch = async (url, options) => {
+    calls++;
+    assert.equal(url.pathname, '/oauth2/token');
+    assert.equal(options.body.get('grant_type'), 'refresh_token');
+    assert.equal(options.body.get('refresh_token'), 'refresh-1');
+    return { ok: true, json: async () => ({ access_token: 'new', id_token: idToken(), token_type: 'Bearer', expires_in: 3600, refresh_token: 'refresh-2' }) };
+  };
+  assert.deepEqual(await Promise.all([ctx.auth.ensureAccessToken(), ctx.auth.ensureAccessToken()]), ['new', 'new']);
+  assert.equal(calls, 1);
+  assert.equal(JSON.parse(ctx.storage.get(tokenKey)).refreshToken, 'refresh-2');
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ access_token: 'next', id_token: idToken(), token_type: 'Bearer', expires_in: 3600 }) });
+  assert.equal(await ctx.auth.ensureAccessToken('new'), 'next');
+  assert.equal(JSON.parse(ctx.storage.get(tokenKey)).refreshToken, 'refresh-2');
+  ctx.storage.set(tokenKey, JSON.stringify({ ...JSON.parse(ctx.storage.get(tokenKey)), expiresAt: 0 }));
+  ctx = await setup(ctx.storage);
+  assert.equal(await ctx.auth.initializeAuth(), true);
+  assert.equal(ctx.redirects.length, 0);
+});
+
+test('temporary refresh failures retain credentials; invalid_grant clears them', async () => {
+  const ctx = await setup();
+  ctx.storage.set(tokenKey, JSON.stringify({ accessToken: 'old', expiresAt: 0, refreshToken: 'refresh' }));
+  globalThis.fetch = async () => { throw new Error('offline'); };
+  await assert.rejects(ctx.auth.ensureAccessToken());
+  assert.equal(JSON.parse(ctx.storage.get(tokenKey)).refreshToken, 'refresh');
+  globalThis.fetch = async () => ({ ok: false, json: async () => ({ error: 'server_error' }) });
+  await assert.rejects(ctx.auth.ensureAccessToken());
+  assert.equal(ctx.storage.has(tokenKey), true);
+  globalThis.fetch = async () => ({ ok: false, status: 400, json: async () => ({ error: 'invalid_grant' }) });
+  assert.equal(await ctx.auth.ensureAccessToken(), null);
+  assert.equal(ctx.storage.has(tokenKey), false);
+});
+
+test('logout during refresh cannot restore credentials', async () => {
+  const ctx = await setup();
+  ctx.storage.set(tokenKey, JSON.stringify({ accessToken: 'old', expiresAt: 0, refreshToken: 'refresh' }));
+  let resolve;
+  globalThis.fetch = () => new Promise((done) => { resolve = done; });
+  const pending = ctx.auth.ensureAccessToken();
+  ctx.auth.logout();
+  resolve({ ok: true, json: async () => ({ access_token: 'new', id_token: idToken(), token_type: 'Bearer', expires_in: 3600 }) });
+  assert.equal(await pending, null);
+  assert.equal(ctx.storage.has(tokenKey), false);
+});
+
+test('concurrent API 401s refresh once and retry once; repeated 401 stops', async () => {
+  const ctx = await setup();
+  ctx.storage.set(tokenKey, JSON.stringify({ accessToken: 'old', idToken: idToken(), idExpiresAt: Date.now() + 3600000, expiresAt: Date.now() + 3600000, refreshToken: 'refresh' }));
+  const axiosUrl = new URL('../node_modules/axios/index.js', import.meta.url).href;
+  const source = (await readFile(new URL('../src/api/apiClient.js', import.meta.url), 'utf8'))
+    .replace("'axios'", JSON.stringify(axiosUrl))
+    .replace("'../auth/cognito.js'", JSON.stringify(ctx.moduleUrl))
+    .replace('import.meta.env.VITE_API_BASE_URL', JSON.stringify(env.VITE_API_BASE_URL));
+  const { default: api } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
+  let refreshes = 0;
+  globalThis.fetch = async () => {
+    refreshes++;
+    return { ok: true, json: async () => ({ access_token: 'new', id_token: idToken(), token_type: 'Bearer', expires_in: 3600 }) };
+  };
+  let requests = 0;
+  api.defaults.adapter = async (config) => {
+    requests++;
+    if (config.headers.get('Authorization') === 'Bearer old') throw { config, response: { status: 401 } };
+    return { data: {}, status: 200, config };
+  };
+  await Promise.all([api.get('/calendar'), api.get('/calendar')]);
+  assert.equal(refreshes, 1);
+  assert.equal(requests, 4);
+  assert.equal(ctx.redirects.length, 0);
+  requests = 0;
+  api.defaults.adapter = async (config) => { requests++; throw { config, response: { status: 401 } }; };
+  await assert.rejects(api.get('/calendar'));
+  assert.equal(requests, 2);
+  assert.equal(ctx.redirects.length, 0);
+  assert.equal(JSON.parse(ctx.storage.get(tokenKey)).refreshToken, 'refresh');
+});
+
+
+test('browser restart with empty sessionStorage restores persisted tokens and renews expired ID token', async () => {
+  let ctx = await setup();
+  ctx.storage.set(tokenKey, JSON.stringify({ accessToken: 'still-valid', expiresAt: Date.now() + 3600000,
+    idToken: idToken(0), idExpiresAt: 0, refreshToken: 'persistent-refresh' }));
+  ctx = await setup(ctx.storage, 'http://localhost:5173/', new Map());
+  let calls = 0;
+  globalThis.fetch = async (_, options) => {
+    calls++;
+    assert.equal(options.body.get('refresh_token'), 'persistent-refresh');
+    return { ok: true, json: async () => ({ access_token: 'renewed-access', id_token: idToken(), token_type: 'Bearer', expires_in: 3600 }) };
+  };
+  assert.equal(await ctx.auth.initializeAuth(), true);
+  assert.equal(calls, 1);
+  assert.equal(ctx.auth.getAccessToken(), 'renewed-access');
+  assert.equal(ctx.redirects.length, 0);
+  assert.equal(ctx.session.has(tokenKey), false);
+  ctx = await setup(ctx.storage, 'http://localhost:5173/', new Map());
+  assert.equal(await ctx.auth.initializeAuth(), true);
+  assert.equal(calls, 1);
+  ctx.auth.logout();
+  assert.equal(ctx.storage.has(tokenKey), false);
+  ctx = await setup(ctx.storage, 'http://localhost:5173/', new Map());
+  assert.equal(await ctx.auth.initializeAuth(), false);
+  assert.equal(ctx.redirects[0].pathname, '/oauth2/authorize');
+});
+
+test('legacy session tokens migrate; temporary startup failure can retry without login', async () => {
+  const ctx = await setup();
+  ctx.session.set(tokenKey, JSON.stringify({ accessToken: 'old', expiresAt: 0, refreshToken: 'legacy-refresh' }));
+  globalThis.fetch = async () => { throw new Error('offline'); };
+  await assert.rejects(ctx.auth.initializeAuth());
+  assert.equal(ctx.session.has(tokenKey), false);
+  assert.equal(JSON.parse(ctx.storage.get(tokenKey)).refreshToken, 'legacy-refresh');
+  assert.equal(ctx.redirects.length, 0);
+  let status;
+  window.addEventListener(ctx.auth.AUTH_EVENT, (event) => { status = event.detail; });
+  await ctx.auth.retryLogin();
+  assert.equal(status, 'error');
+  assert.equal(ctx.redirects.length, 0);
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ access_token: 'new', id_token: idToken(), token_type: 'Bearer', expires_in: 3600 }) });
+  await ctx.auth.retryLogin();
+  assert.equal(status, 'ready');
+  assert.equal(ctx.redirects.length, 0);
+});
+
+test('expired refresh token at startup redirects to Cognito', async () => {
+  const ctx = await setup();
+  ctx.storage.set(tokenKey, JSON.stringify({ accessToken: 'expired', expiresAt: 0, refreshToken: 'expired-refresh' }));
+  globalThis.fetch = async () => ({ ok: false, status: 400, json: async () => ({ error: 'invalid_grant' }) });
+  assert.equal(await ctx.auth.initializeAuth(), false);
+  assert.equal(ctx.storage.has(tokenKey), false);
+  assert.equal(ctx.redirects[0].pathname, '/oauth2/authorize');
+});
+
+test('another tab removing persisted tokens prevents an in-flight refresh restoring the session', async () => {
+  const ctx = await setup();
+  ctx.storage.set(tokenKey, JSON.stringify({ accessToken: 'old', expiresAt: 0, refreshToken: 'refresh' }));
+  let resolve;
+  globalThis.fetch = () => new Promise((done) => { resolve = done; });
+  const pending = ctx.auth.ensureAccessToken();
+  ctx.storage.delete(tokenKey);
+  resolve({ ok: true, json: async () => ({ access_token: 'new', id_token: idToken(), token_type: 'Bearer', expires_in: 3600 }) });
+  assert.equal(await pending, null);
+  assert.equal(ctx.storage.has(tokenKey), false);
+});
+
+
+test('cross-tab lock reuses rotated tokens instead of refreshing twice', async () => {
+  const first = await setup();
+  first.storage.set(tokenKey, JSON.stringify({ accessToken: 'old', expiresAt: 0, refreshToken: 'refresh' }));
+  const second = await setup(first.storage, 'http://localhost:5173/', new Map());
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  let queue = Promise.resolve();
+  let locks = 0;
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { locks: {
+    request: (name, callback) => {
+      assert.equal(name, 'morning-duty.auth.refresh');
+      locks++;
+      queue = queue.then(callback);
+      return queue;
+    },
+  } } });
+  try {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return { ok: true, json: async () => ({ access_token: 'new', id_token: idToken(), token_type: 'Bearer', expires_in: 3600, refresh_token: 'rotated' }) };
+    };
+    assert.deepEqual(await Promise.all([first.auth.ensureAccessToken(), second.auth.ensureAccessToken()]), ['new', 'new']);
+    assert.equal(calls, 1);
+    assert.equal(locks, 2);
+    assert.equal(JSON.parse(first.storage.get(tokenKey)).refreshToken, 'rotated');
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, 'navigator', descriptor);
+    else delete globalThis.navigator;
+  }
+});
+
+test('storage logout event clears this tab and goes through Cognito logout', async () => {
+  const ctx = await setup();
+  storedToken(ctx.storage);
+  ctx.storage.delete(tokenKey);
+  const event = new Event('storage');
+  Object.defineProperty(event, 'key', { value: tokenKey });
+  window.dispatchEvent(event);
+  assert.equal(ctx.auth.getAccessToken(), null);
+  assert.equal(ctx.redirects[0].pathname, '/logout');
 });

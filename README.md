@@ -28,13 +28,15 @@ API Gateway CORS에는 Origin `http://localhost:5173`, `https://d88l94lniveng.cl
 ## Phase 6 인증
 
 - Route는 `/` 하나. 인증 완료 전에는 CalendarPage를 마운트하지 않는다.
-- 유효한 Access Token이 없으면 매번 무작위 state/verifier와 S256 challenge를 생성하여 Cognito로 이동한다.
+- 유효한 Access Token과 갱신 가능한 Refresh Token이 없으면 매번 무작위 state/verifier와 S256 challenge를 생성하여 Cognito로 이동한다.
 - Root callback에서 state 및 10분 유효기간을 검사하고 verifier로 code를 교환한다. StrictMode에서도 교환은 한 번만 실행한다.
-- Access Token과 만료 시각만 sessionStorage에 저장한다. ID/Refresh Token은 저장하지 않는다. 만료 30초 전부터 재인증한다.
-- callback의 code/state 및 오류 파라미터를 URL에서 제거한다. 인증 실패 시 민감한 정보 없이 오류와 재로그인 버튼을 표시한다.
-- 공통 Axios가 세 API 모두에 Access Token을 자동 첨부하며 토큰이 없으면 요청을 차단한다. 토큰/코드/verifier/Authorization 헤더를 로그로 출력하지 않는다.
-- 첫 401은 인증을 정리하고 자동 로그인한다. 같은 탭 세션에서 재발하면 자동 이동을 중단한다. 이 제한은 명시적인 재로그인 또는 로그아웃으로 초기화한다.
-- Header 로그아웃은 로컬 인증을 제거하고 Cognito `/logout`으로 이동한다. 환경별 Root 복귀 후 다시 Managed Login으로 이동한다.
+- Access Token, ID Token, Refresh Token 및 각 만료 시각을 localStorage에 저장하여 브라우저 종료 후에도 유지한다. PKCE state/verifier와 로그인 오류 제어는 탭별 sessionStorage에 둔다. 기존 sessionStorage 토큰은 초기 접속 시 이동한다.
+- 초기 접속 및 API 요청 시 Access Token 또는 ID Token이 만료 30초 이내이면 Refresh Token으로 두 토큰을 갱신한다. ID Token의 exp는 갱신 시점 계산에만 사용하며, API Authorization Bearer에는 Access Token만 사용한다.
+- 동시 갱신은 한 요청으로 합치며 Web Locks 지원 브라우저에서는 탭 사이에도 갱신을 직렬화한다. Rotation 응답의 새 Refresh Token을 저장한다.
+- callback의 code/state 및 오류 파라미터를 URL에서 제거한다. 일시적인 갱신 오류에는 토큰을 보존하고 재시도 UI를 제공한다. 재시도 버튼은 유효한 Refresh Token이 있으면 로그인 이동 없이 갱신을 다시 시도한다.
+- 공통 Axios가 세 API 모두에 Access Token을 자동 첨부한다. 토큰/코드/verifier/Authorization 헤더를 로그로 출력하지 않는다.
+- 첫 401은 갱신 후 원래 요청을 한 번 재시도한다. 재시도도 401이면 세션을 보존하고 API 오류를 반환한다. Refresh Token이 없거나 만료·취소 등으로 invalid_grant를 받으면 로그인으로 이동한다. 일시적 네트워크/서버 오류는 로그인 이동 사유가 아니다.
+- Header 로그아웃은 지속 저장된 인증과 이전 세션 토큰을 제거하고 Cognito `/logout`으로 이동한다. 다른 탭에도 로그아웃을 반영하고 늦은 갱신 응답의 세션 복원을 차단한다. 환경별 Root 복귀 후 다시 Managed Login으로 이동한다.
 
 ## 테스트 및 운영 빌드
 
@@ -49,10 +51,12 @@ npm run build
 
 ## 구현
 
+- DB의 `holiday`는 공휴일 표시로 유지한다. 화면은 `holiday === true` 또는 `dayOfWeek`가 SAT/SUN이면 휴일로 처리하여 클릭 및 休日 상세 표시를 허용하고 일정 교환에서 제외한다. 토요일 날짜의 파란색 표시는 유지한다.
+
 - 공통 Axios Client가 `VITE_API_BASE_URL`을 사용하고 `GET /calendar?year=...&month=...`를 요청한다.
 - 초기 월은 Asia/Tokyo의 현재 월. 이전/다음 버튼은 API `navigation`에 따라 활성화되며 연도 경계도 처리한다.
 - `currentUser`, `navigation`, `days`, `changeCandidates`를 응답 그대로 사용한다. `calendarMock.js`는 기존 참고 fixture로만 유지하며 앱에서 import하지 않는다.
-- 프런트엔드에서 날짜/공휴일/후보를 생성하지 않는다. 식별자가 null인 후보는 Dropdown에서 제외한다.
+- 프런트엔드에서 날짜/공휴일/후보를 생성하지 않는다. 식별자가 null인 후보 및 토·일요일/휴일 후보는 Dropdown에서 제외한다.
 - 조회 중 상태 표시, 실패 메시지와 재조회, 15초 요청 timeout, 화면 해제/요청 교체 시 취소 처리. API 주소 미설정 및 잘못된 응답도 오류로 표시한다. Mock으로 대체하지 않는다.
 - MY_DUTY의 안내/신청 버튼을 708px 패널 하단에 고정. Dropdown 개폐 시 위치/높이를 유지하고 목록만 최대 5행 내에서 스크롤한다. 좁은 화면에서는 남은 공간에 맞춰 목록 높이만 줄어든다.
 - 안내 문구는 요청한 일본어 두 문장 사이에 명시적 줄바꿈을 적용했다. 기존 글자 크기와 패널 폭을 유지하여 각 문장은 화면 폭에 따라 추가로 줄바꿈된다.
@@ -69,6 +73,9 @@ npm run build
 - Header/Calendar 디자인, 패널 708px 높이·하단 안내/버튼 고정, Dropdown 최대 5행 내부 스크롤 유지.
 
 ## 검증 및 확인 방법
+
+- 주말 휴일 처리: `holiday: false`인 SAT/SUN도 선택 가능하고 휴일로 판정되는지, 담당자가 있어도 교환 후보에서 제외되는지 공통 함수 검증 완료. 미배정 평일 선택 불가, 평일 공휴일 판정, null ID 후보 제외도 확인했다.
+- 해당 변경 후 인증 테스트 5개 및 운영 빌드 통과. 운영 반영 시 최신 `dist/index.html`과 `dist/assets/`를 S3 Root에 업로드하고 CloudFront 캐시를 무효화한다.
 
 - `npm run build` 통과.
 - Chrome/Playwright에서 실제 Axios 요청을 가로채 API 규격의 통제된 응답으로 검증했다. 실제 배포 API 검증과는 구분한다.

@@ -1,11 +1,12 @@
 import { useState } from 'react';
+import { isHoliday, isChangeCandidate } from '../utils/calendarDay.js';
 import ChangeCandidateDropdown from './ChangeCandidateDropdown.jsx';
 
 const weekdays = { SUN: '日', MON: '月', TUE: '火', WED: '水', THU: '木', FRI: '金', SAT: '土' };
 
 export default function DetailPanel({ day, candidates, onSwap, swapPending = false, swapError = '' }) {
   const [targetDate, setTargetDate] = useState('');
-  const state = !day ? 'EMPTY' : day.holiday ? 'HOLIDAY' : day.mine ? 'MY_DUTY' : 'OTHER_DUTY';
+  const state = !day ? 'EMPTY' : isHoliday(day) ? 'HOLIDAY' : day.mine ? 'MY_DUTY' : 'OTHER_DUTY';
   return (
     <aside className="card detail-panel" aria-labelledby="detail-heading">
       <h2 id="detail-heading">
@@ -31,7 +32,7 @@ export default function DetailPanel({ day, candidates, onSwap, swapPending = fal
           {swapError && <p className="swap-error" role="alert">{swapError}</p>}
           <p className="change-note"><span aria-hidden="true">ⓘ</span><span>変更を申請すると、双方の担当者にメールで通知されます。<br />事前に相手と確認のうえ、どちらか一方が変更してください。</span></p>
           <button className="submit-change" type="button" aria-busy={swapPending}
-            disabled={swapPending || !candidates.some((candidate) => candidate.date === targetDate && candidate.assignedUserId != null)}
+            disabled={swapPending || !candidates.some((candidate) => candidate.date === targetDate && isChangeCandidate(candidate))}
             onClick={() => onSwap(targetDate)}>{swapPending ? '変更中...' : '変更を申請'}</button>
         </div>
       </div>}

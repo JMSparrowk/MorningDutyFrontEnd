@@ -13,7 +13,7 @@ export default function AuthGate({ children }) {
   }, []);
   if (status === 'ready') return children;
   return <main className="calendar-layout"><div role={status === 'error' ? 'alert' : 'status'}>
-    <p>{status === 'error' ? '認証できませんでした。設定を確認して、もう一度ログインしてください。' : '認証中...'}</p>
-    {status === 'error' && <button type="button" className="logout-button" onClick={retryLogin}>再ログイン</button>}
+    <p>{status === 'error' ? '認証を確認できませんでした。もう一度お試しください。' : '認証中...'}</p>
+    {status === 'error' && <button type="button" className="logout-button" onClick={retryLogin}>再試行</button>}
   </div></main>;
 }

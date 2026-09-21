@@ -6,6 +6,8 @@ const BLOCKED = 'morning-duty.auth.blocked';
 export const AUTH_EVENT = 'morning-duty-auth-change';
 let initialization;
 let redirecting = false;
+let refreshing;
+let credentialVersion = 0;
 
 function config() {
   const domain = env.VITE_COGNITO_DOMAIN;
@@ -17,7 +19,7 @@ function config() {
 }
 
 function read(key) {
-  try { return JSON.parse(sessionStorage.getItem(key)); } catch { return null; }
+  try { return JSON.parse((key === TOKEN ? localStorage : sessionStorage).getItem(key)); } catch { return null; }
 }
 
 function cleanCallback() {
@@ -31,6 +33,8 @@ function announce(status) {
 }
 
 function clearCredentials() {
+  credentialVersion++;
+  localStorage.removeItem(TOKEN);
   sessionStorage.removeItem(TOKEN);
   sessionStorage.removeItem(TRANSACTION);
 }
@@ -46,8 +50,68 @@ export function getAccessToken() {
   if (typeof saved?.accessToken === 'string' && saved.accessToken && saved.expiresAt > Date.now() + 30000) {
     return saved.accessToken;
   }
-  sessionStorage.removeItem(TOKEN);
   return null;
+}
+
+// Decode exp only to schedule renewal; API Gateway validates the Access Token.
+function idExpiry(token) {
+  try {
+    const part = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const exp = JSON.parse(atob(part.padEnd(Math.ceil(part.length / 4) * 4, '='))).exp;
+    return Number.isFinite(exp) ? exp * 1000 : 0;
+  } catch { return 0; }
+}
+
+function idIsCurrent(saved) {
+  return saved?.idToken && saved.idExpiresAt > Date.now() + 30000;
+}
+
+function saveTokens(data, refreshToken) {
+  if (typeof data.access_token !== 'string' || !data.access_token || data.token_type?.toLowerCase() !== 'bearer'
+    || !Number.isFinite(data.expires_in) || data.expires_in <= 30) throw new Error('AUTH_TOKEN_INVALID');
+  if (!idExpiry(data.id_token) || idExpiry(data.id_token) <= Date.now() + 30000) throw new Error('AUTH_TOKEN_INVALID');
+  localStorage.setItem(TOKEN, JSON.stringify({ accessToken: data.access_token,
+    idToken: data.id_token, idExpiresAt: idExpiry(data.id_token),
+    expiresAt: Date.now() + data.expires_in * 1000,
+    refreshToken: typeof data.refresh_token === 'string' && data.refresh_token ? data.refresh_token : refreshToken }));
+}
+
+export async function ensureAccessToken(rejectedToken) {
+  if (redirecting) return null;
+  const current = getAccessToken();
+  if (current && current !== rejectedToken && idIsCurrent(read(TOKEN))) return current;
+  if (refreshing) return refreshing;
+  const refresh = async () => {
+    // Re-read after acquiring the cross-tab lock: another tab may have rotated the token.
+    const saved = read(TOKEN);
+    const token = getAccessToken();
+    if (token && token !== rejectedToken && idIsCurrent(saved)) return token;
+    if (!saved?.refreshToken || redirecting) return null;
+    const version = credentialVersion;
+    const snapshot = localStorage.getItem(TOKEN);
+    const unchanged = () => version === credentialVersion && localStorage.getItem(TOKEN) === snapshot;
+    const { domain, clientId } = config();
+    const response = await fetch(new URL('/oauth2/token', domain), {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'refresh_token', client_id: clientId, refresh_token: saved.refreshToken }),
+      credentials: 'omit', signal: AbortSignal.timeout(15000),
+    });
+    if (!unchanged()) return getAccessToken();
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      if (!unchanged()) return getAccessToken();
+      if (response.status === 400 && error.error === 'invalid_grant') { clearCredentials(); return null; }
+      throw new Error('AUTH_REFRESH_FAILED');
+    }
+    const data = await response.json();
+    if (!unchanged()) return getAccessToken();
+    saveTokens(data, saved.refreshToken);
+    return getAccessToken();
+  };
+  refreshing = globalThis.navigator?.locks
+    ? navigator.locks.request('morning-duty.auth.refresh', refresh)
+    : refresh();
+  try { return await refreshing; } finally { refreshing = undefined; }
 }
 
 function base64url(bytes) {
@@ -77,7 +141,10 @@ async function login() {
 
 async function initialize() {
   try {
-    if (getAccessToken()) { cleanCallback(); return true; }
+    // Upgrade the previous tab-only session once; never leave a stale migration copy.
+    const legacy = sessionStorage.getItem(TOKEN);
+    if (legacy && !localStorage.getItem(TOKEN)) localStorage.setItem(TOKEN, legacy);
+    sessionStorage.removeItem(TOKEN);
     const params = new URL(window.location.href).searchParams;
     if (params.has('error')) throw new Error('AUTH_CALLBACK_FAILED');
     if (params.has('code')) {
@@ -98,18 +165,22 @@ async function initialize() {
       });
       if (!response.ok) throw new Error('AUTH_EXCHANGE_FAILED');
       const data = await response.json();
-      if (typeof data.access_token !== 'string' || !data.access_token || data.token_type?.toLowerCase() !== 'bearer'
-        || !Number.isFinite(data.expires_in) || data.expires_in <= 30) throw new Error('AUTH_TOKEN_INVALID');
-      // Only the Access Token is retained. ID/Refresh Tokens are neither stored nor logged.
-      sessionStorage.setItem(TOKEN, JSON.stringify({ accessToken: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 }));
+      saveTokens(data);
+      sessionStorage.removeItem(RECOVERY);
       sessionStorage.removeItem(BLOCKED);
       return true;
     }
     if (sessionStorage.getItem(BLOCKED)) throw new Error('AUTH_BLOCKED');
+    if (await ensureAccessToken()) return true;
     await login();
     return false;
   } catch {
     cleanCallback();
+    if (read(TOKEN)?.refreshToken) {
+      initialization = undefined;
+      announce('error');
+      throw new Error('AUTH_REFRESH_FAILED');
+    }
     block();
     throw new Error('AUTH_FAILED');
   }
@@ -125,12 +196,20 @@ export async function recoverAuthentication() {
   if (redirecting) return;
   clearCredentials();
   if (sessionStorage.getItem(RECOVERY) || sessionStorage.getItem(BLOCKED)) { block(); return; }
-  // Persist across callbacks/reloads; reset only by an explicit retry or logout.
+  // Avoid redirect loops until a successful callback, explicit retry, or logout.
   sessionStorage.setItem(RECOVERY, '1');
   try { await login(); } catch { /* login already published a safe error */ }
 }
 
 export async function retryLogin() {
+  if (read(TOKEN)?.refreshToken) {
+    announce('loading');
+    try {
+      if (await ensureAccessToken()) { initialization = Promise.resolve(true); announce('ready'); return; }
+      await recoverAuthentication();
+    } catch { announce('error'); }
+    return;
+  }
   clearCredentials();
   sessionStorage.removeItem(RECOVERY);
   sessionStorage.removeItem(BLOCKED);
@@ -151,3 +230,12 @@ export function logout() {
     window.location.replace(url.href);
   } catch { block(); }
 }
+
+window.addEventListener('storage', (event) => {
+  if ((event.key === TOKEN || event.key === null) && !read(TOKEN)) {
+    credentialVersion++;
+    sessionStorage.removeItem(TOKEN);
+    initialization = undefined;
+    logout();
+  }
+});

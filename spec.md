@@ -341,37 +341,38 @@ Calendar 날짜를 Frontend에서 별도로 생성하지 않는다.
 
 # 13. Calendar Day 판정
 
-Backend Response의:
+Backend Response의 `mine`, `holiday`, `dayOfWeek`, `hasSchedule`,
+`assignedUserId`, `assignedUserName`을 사용한다.
 
-```text
-mine
-holiday
-hasSchedule
-assignedUserId
-assignedUserName
+DB의 `holiday`는 공휴일(빨간날) 값으로 유지한다. 일반 토·일요일은
+`holiday == false`여도 Frontend에서 휴일로 처리한다.
+DB와 API 응답 원본을 수정하거나 날짜·공휴일을 새로 생성하지 않는다.
+
+화면의 휴일 판정:
+
+```javascript
+const holiday = day.holiday || day.dayOfWeek === 'SAT' || day.dayOfWeek === 'SUN';
 ```
 
-을 사용한다.
+* 휴일 판정을 본인/타인 담당 여부보다 우선한다.
+* 본인 담당일: `mine == true`이고 화면의 휴일 판정이 false.
+* 다른 사용자 담당일: `mine == false`, `hasSchedule == true`,
+  `assignedUserId != null`이고 화면의 휴일 판정이 false.
+* 토·일요일도 클릭 가능하며 DetailPanel은 `HOLIDAY`, 담당자는 `休日`로 표시한다.
+* 휴일 배경을 적용하되 기존 토요일 날짜의 파란색 표시는 유지한다.
+* 공휴일명은 API의 `holidayName`이 있을 때만 표시한다.
+* 주말이라는 이유만으로 공휴일명이나 `・祝` 표시를 추가하지 않는다.
 
-본인 담당일:
+날짜 클릭 조건:
 
-```text
-mine == true
+```javascript
+holiday || day.mine || (day.hasSchedule && day.assignedUserId != null)
 ```
 
-다른 사용자:
-
-```text
-mine == false
-hasSchedule == true
-holiday == false
-```
-
-휴일:
-
-```text
-holiday == true
-```
+일정 교환 POST 처리 중에는 모든 날짜 클릭을 비활성화한다.
+담당자 없는 평일은 클릭할 수 없다. 오늘 날짜 자동 선택에도 같은 판정을 적용한다.
+휴일과 주말은 일정 교환의 원본 날짜 및 변경 후보에서 제외한다.
+공통 판정 함수는 `src/utils/calendarDay.js`에서 관리한다.
 
 ---
 
@@ -496,7 +497,11 @@ Frontend에서도 다음 데이터는 제외한다.
 
 ```text
 assignedUserId == null
+holiday == true
+dayOfWeek == 'SAT' 또는 'SUN'
 ```
+
+위 조건 중 하나라도 해당하면 제외한다. 공휴일 후보 제외에는 API가 제공한 `holiday` 값을 사용한다.
 
 `assignedUserName`이 있어도 `assignedUserId`가 없으면 후보에 포함하지 않는다.
 
@@ -733,7 +738,8 @@ Callback 전용 Route는 추가하지 않는다.
 * Endpoint를 임의로 추가하지 않는다.
 * 사용자 식별은 assignedUserId 기준이다.
 * assignedUserName은 표시용이다.
-* assignedUserId가 없는 사용자는 변경 후보에서 제외한다.
+* assignedUserId가 없는 사용자 및 토·일요일/휴일은 변경 후보에서 제외한다.
+* DB holiday 값과 별개로 화면의 휴일 판정에는 dayOfWeek의 SAT/SUN을 포함한다.
 * Swap 성공 후 GET /calendar를 다시 호출한다.
 * Cognito Access Token을 API 요청에 사용한다.
 * 요구사항에 없는 기능은 추가하지 않는다.

@@ -1,10 +1,11 @@
+import { isChangeCandidate } from '../utils/calendarDay.js';
 import { useEffect, useId, useRef, useState } from 'react';
 
 const weekdays = { SUN: '日', MON: '月', TUE: '火', WED: '水', THU: '木', FRI: '金', SAT: '土' };
 const label = (item) => `${item.date.slice(5, 7)}月${item.date.slice(8)}日 (${weekdays[item.dayOfWeek]}) - ${item.assignedUserName}`;
 
 export default function ChangeCandidateDropdown({ candidates, value, onChange, disabled = false }) {
-  const items = candidates.filter((item) => item.assignedUserId != null);
+  const items = candidates.filter(isChangeCandidate);
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const root = useRef(null);

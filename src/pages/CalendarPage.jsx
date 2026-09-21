@@ -1,3 +1,4 @@
+import { isHoliday, isSelectableDay, isChangeCandidate } from '../utils/calendarDay.js';
 import { useEffect, useRef, useState } from 'react';
 import { getCalendar } from '../api/calendarApi.js';
 import { updateNotification } from '../api/notificationApi.js';
@@ -87,7 +88,7 @@ export default function CalendarPage() {
           setResult({ data, loading: false, error: '' });
           const today = tokyoToday();
           const day = data.days.find((item) => item.date === today.date);
-          const selectable = day && (day.mine || day.holiday || day.hasSchedule);
+          const selectable = isSelectableDay(day);
           setSelectedDate(data.year === today.year && data.month === today.month && selectable ? today.date : null);
         }
       })
@@ -104,8 +105,8 @@ export default function CalendarPage() {
   const selectedDay = calendar.days.find((day) => day.date === selectedDate);
 
   async function changeSchedule(targetDate) {
-    if (swapRequest.current || result.loading || !selectedDay?.mine || selectedDay.holiday
-      || !calendar.changeCandidates.some((candidate) => candidate.date === targetDate && candidate.assignedUserId != null)) return;
+    if (swapRequest.current || result.loading || !selectedDay?.mine || isHoliday(selectedDay)
+      || !calendar.changeCandidates.some((candidate) => candidate.date === targetDate && isChangeCandidate(candidate))) return;
     swapRequest.current = true;
     setSwapPending(true);
     setSwapError('');
