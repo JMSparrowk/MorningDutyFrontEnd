@@ -1,0 +1,75 @@
+:root {
+  font-family: "Noto Sans JP", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+  color: #0c204b;
+  background: #f2f7fb;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --border: #dfe7ef;
+  --muted: #7889a2;
+  --blue: #0073ff;
+  --mine-bg: #eaf5ff;
+  --other-bg: #f3f5f8;
+  --holiday-bg: #fff1f4;
+  --holiday-text: #ff173d;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 360px; }
+button { font: inherit; }
+button:disabled { cursor: default; }
+h1, h2, p { margin: 0; }
+button:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+
+.app-header {
+  min-height: 100px;
+  padding: 20px 38px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  background: #fff;
+  border-bottom: 1px solid var(--border);
+}
+.app-header h1 { font-size: 30px; line-height: 1.4; letter-spacing: .025em; }
+.app-subtitle { color: #61718b; font-size: 19px; }
+.header-actions { display: flex; align-items: center; gap: 20px; }
+.signed-in-user { font-size: 18px; font-weight: 700; }
+.logout-button {
+  padding: 11px 18px;
+  background: #fff;
+  color: var(--muted);
+  border: 1px solid #cbd5e2;
+  border-radius: 5px;
+  font-weight: 700;
+}
+.notification-control {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 20px;
+  border-left: 1px solid var(--border);
+  font-size: 15px;
+}
+.notification-toggle { width: 48px; height: 26px; padding: 3px; border: 0; border-radius: 20px; background: #b5beca; }
+.notification-toggle::before { content: ''; display: block; width: 20px; height: 20px; border-radius: 50%; background: #fff; }
+.notification-toggle[aria-checked="true"] { background: var(--blue); }
+.notification-toggle[aria-checked="true"]::before { transform: translateX(22px); }
+
+/* TODO: mobile layout has no reference; confirm before Phase 2 refinement. */
+@media (max-width: 1000px) {
+  .app-header { flex-wrap: wrap; padding: 20px 24px; }
+  .header-actions { flex-wrap: wrap; gap: 14px; }
+}
+@media (max-width: 540px) {
+  .app-header h1 { font-size: 24px; }
+  .notification-control {
+  position: relative; padding-left: 0; border-left: 0; }
+}
+
+.notification-toggle:not(:disabled) { cursor: pointer; }
+.notification-error { position: absolute; top: calc(100% + 6px); right: 0; width: 290px; max-width: calc(100vw - 48px); color: var(--holiday-text); font-size: 12px; line-height: 1.4; }
+
+@media (max-width: 540px) {
+  .notification-error { left: 0; right: auto; }
+}
